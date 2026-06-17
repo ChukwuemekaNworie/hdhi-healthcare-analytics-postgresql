@@ -1,1 +1,207 @@
 
+==============================================================================
+-- HEART DISEASE HOSPITALIZATION INFERENCES (HDHI) DATA ENGINE ARCHITECTURE
+-- DATABASE DEVELOPMENT & ADVANCED ANALYTICAL VIEW LAYER PIPELINE
+==============================================================================
+
+------------------------------------------------------------------------------
+-- STEP 1: TARGET SCHEMA STORAGE INITIALIZATION
+------------------------------------------------------------------------------
+DROP TABLE IF EXISTS public.admissions CASCADE;
+
+CREATE TABLE public.admissions (
+    sno                             INTEGER,
+    mrd_no                          VARCHAR(100),
+    d_o_a                           TEXT,
+    d_o_d                           TEXT,
+    age                             INTEGER,
+    gender                          VARCHAR(50),
+    rural                           VARCHAR(50),
+    type_of_admission               VARCHAR(100),
+    month_year                      VARCHAR(50),
+    duration_of_stay                INTEGER,
+    duration_of_intensive_unit_stay INTEGER,
+    outcome                         VARCHAR(100),
+    smoking                         DECIMAL(10,2),
+    alcohol                         DECIMAL(10,2),
+    dm                              DECIMAL(10,2),
+    htn                             DECIMAL(10,2),
+    cad                             DECIMAL(10,2),
+    prior_cmp                       DECIMAL(10,2),
+    ckd                             DECIMAL(10,2),
+    hb                              DECIMAL(10,2),
+    tlc                             DECIMAL(10,2),
+    platelets                       DECIMAL(10,2),
+    glucose                         DECIMAL(10,2),
+    urea                            DECIMAL(10,2),
+    creatinine                      DECIMAL(10,2),
+    bnp                             DECIMAL(10,2),
+    raised_cardiac_enzymes          DECIMAL(10,2),
+    ef                              DECIMAL(10,2),
+    severe_anaemia                  DECIMAL(10,2),
+    anaemia                         DECIMAL(10,2),
+    stable_angina                   DECIMAL(10,2),
+    acs                             DECIMAL(10,2),
+    stemi                           DECIMAL(10,2),
+    atypical_chest_pain             DECIMAL(10,2),
+    heart_failure                   DECIMAL(10,2),
+    hfref                           DECIMAL(10,2),
+    hfnef                           DECIMAL(10,2),
+    valvular                        DECIMAL(10,2),
+    chb                             DECIMAL(10,2),
+    sss                             DECIMAL(10,2),
+    aki                             DECIMAL(10,2),
+    cva_infract                     DECIMAL(10,2),
+    cva_bleed                       DECIMAL(10,2),
+    af                              DECIMAL(10,2),
+    vt                              DECIMAL(10,2),
+    psvt                            DECIMAL(10,2),
+    congenital                      DECIMAL(10,2),
+    uti                             DECIMAL(10,2),
+    neuro_cardiogenic_syncope       DECIMAL(10,2),
+    orthostatic                     DECIMAL(10,2),
+    infective_endocarditis          DECIMAL(10,2),
+    dvt                             DECIMAL(10,2),
+    cardiogenic_shock               DECIMAL(10,2),
+    shock                           DECIMAL(10,2),
+    pulmonary_embolism              DECIMAL(10,2),
+    chest_infection                 TEXT
+);
+
+-- Note: User runs their server-side COPY or client-side \copy here after creation.
+-- SELECT * FROM public.admissions LIMIT 5;
+
+------------------------------------------------------------------------------
+-- STEP 2: STAGE ADVANCED DEDUPLICATION & METADATA CLEANING VIEW
+------------------------------------------------------------------------------
+DROP VIEW IF EXISTS public.vw_admission CASCADE;
+
+CREATE VIEW public.vw_admission AS 
+
+WITH parsed_dates AS (
+    SELECT 
+        sno, mrd_no, age, gender, rural, type_of_admission, month_year,
+        duration_of_stay, duration_of_intensive_unit_stay, outcome,
+        stemi::INTEGER, heart_failure::INTEGER, cardiogenic_shock::INTEGER, vt::INTEGER, acs::INTEGER,
+        smoking, alcohol, dm, htn, hb, creatinine, -- Restored diagnostic fields for metrics queries
+        
+        -- Convert string dates safely to true native DATE types first
+        CASE WHEN d_o_a ~ '^\d{2}/\d{2}/\d{4}$' THEN to_date(d_o_a, 'DD/MM/YYYY') ELSE NULL END::DATE AS clean_d_o_a,
+        CASE WHEN d_o_d ~ '^\d{2}/\d{2}/\d{4}$' THEN to_date(d_o_d, 'DD/MM/YYYY') ELSE NULL END::DATE AS clean_d_o_d
+    FROM public.admissions
+),
+main_clean_data AS (
+    SELECT 
+        sno, mrd_no, age, gender, rural, type_of_admission, month_year,
+        duration_of_stay, duration_of_intensive_unit_stay, outcome,
+        stemi, heart_failure, cardiogenic_shock, vt, acs,
+        smoking, alcohol, dm, htn, hb, creatinine,
+        clean_d_o_a AS d_o_a,
+        clean_d_o_d AS d_o_d,
+
+        -- Windows function partition to locate timeline replication anomalies
+        ROW_NUMBER() OVER( 
+            PARTITION BY mrd_no, clean_d_o_a, clean_d_o_d, type_of_admission 	
+            ORDER BY sno ASC 
+        ) AS dup_no	
+    FROM parsed_dates
+)
+SELECT 
+    sno, mrd_no, d_o_a, d_o_d, age, gender, rural, type_of_admission, month_year,
+    duration_of_stay, duration_of_intensive_unit_stay, outcome,
+    stemi, heart_failure, cardiogenic_shock, vt, acs,
+    smoking, alcohol, dm, htn, hb, creatinine
+FROM main_clean_data
+WHERE dup_no = 1 
+  AND mrd_no IS NOT NULL
+  -- Clinical Guardrails Remediation Layer
+  AND duration_of_stay >= 0                                    
+  AND (d_o_d IS NULL OR d_o_a IS NULL OR d_o_d >= d_o_a);
+
+------------------------------------------------------------------------------
+-- STEP 3: PRODUCTION BUSINESS INTELLIGENCE QUERIES
+------------------------------------------------------------------------------
+
+/*
+    💼 BUSINESS QUESTION 1
+    Which heart conditions keep patients in intensive care (ICU)
+    beds the longest, and where are our biggest hospital bed bottlenecks? 
+*/
+
+WITH condition_metrics AS (
+    SELECT 
+        CASE 
+            WHEN cardiogenic_shock = 1 THEN 'Cardiogenic Shock'
+            WHEN stemi = 1 THEN 'STEMI (Acute Heart Attack)'
+            WHEN vt = 1 THEN 'Ventricular Tachycardia (VT)'
+            WHEN heart_failure = 1 THEN 'Heart Failure'
+            WHEN acs = 1 THEN 'Acute Coronary Syndrome (ACS)'
+            ELSE 'Other Cardiovascular Conditions'
+        END AS primary_clinical_condition,
+        duration_of_stay,
+        duration_of_intensive_unit_stay
+    FROM public.vw_admission
+    WHERE duration_of_stay > 0
+)
+SELECT 
+    primary_clinical_condition,
+    COUNT(*) as total_patient_admissions,
+    ROUND(AVG(duration_of_stay), 0) AS avg_total_length_of_stay,
+    ROUND(AVG(duration_of_intensive_unit_stay), 0) AS avg_icu_length_of_stay,
+    ROUND(
+        (SUM(duration_of_intensive_unit_stay)::DECIMAL / SUM(duration_of_stay)) * 100, 
+        0
+    ) AS icu_to_total_stay_percentage
+FROM condition_metrics
+GROUP BY primary_clinical_condition
+ORDER BY icu_to_total_stay_percentage DESC;
+
+
+/*
+    💼 BUSINESS QUESTION 2
+    How do scheduled vs. emergency admissions alter the critical care timeline?
+*/
+SELECT 
+    COALESCE(NULLIF(TRIM(type_of_admission), ''), 'Unspecified') AS admission_pathway,
+    COUNT(*) as total_admissions,
+    ROUND(AVG(duration_of_stay), 1) AS avg_total_days,
+    ROUND(AVG(duration_of_intensive_unit_stay), 1) AS avg_icu_days,
+    MAX(duration_of_stay) AS max_individual_stay_days
+FROM public.vw_admission
+GROUP BY COALESCE(NULLIF(TRIM(type_of_admission), ''), 'Unspecified') 
+ORDER BY avg_total_days DESC;
+
+
+/*
+    💼 BUSINESS QUESTION 3
+    What are the historical seasonal trends in patient admission volumes?
+*/
+SELECT 
+    COALESCE(NULLIF(TRIM(month_year), ''), 'Unknown Period') AS admission_period,
+    COUNT(*) AS monthly_volume,
+    ROUND(AVG(duration_of_stay), 1) AS avg_monthly_los
+FROM public.vw_admission -- Pointed to clean view layout to ignore double counting
+GROUP BY COALESCE(NULLIF(TRIM(month_year), ''), 'Unknown Period') 
+ORDER BY monthly_volume DESC, admission_period ASC;
+
+
+/*  
+    💼 BUSINESS QUESTION 4
+    Does a patient's geographic location (Rural vs. Urban) influence ICU stay intensity?
+*/
+SELECT 
+    CASE 
+        WHEN TRIM(rural) = '1' THEN 'Rural'
+        ELSE 'Urban/Non-Rural'
+    END AS geographical_demography,
+    COUNT(*) AS count_admission,
+    ROUND(AVG(duration_of_stay), 0) AS avg_total_los,
+    ROUND(AVG(duration_of_intensive_unit_stay), 1) AS total_icu_los,
+    ROUND((SUM(duration_of_intensive_unit_stay)::DECIMAL / SUM(duration_of_stay)) * 100, 1) AS icu_intensity_pct
+FROM public.vw_admission
+WHERE duration_of_stay > 0
+GROUP BY 
+    CASE 
+        WHEN TRIM(rural) = '1' THEN 'Rural'
+        ELSE 'Urban/Non-Rural'
+    END; -- Fixed grouping and completed cut-off code logic
