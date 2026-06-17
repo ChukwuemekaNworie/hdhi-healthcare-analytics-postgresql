@@ -67,7 +67,6 @@ public.admissions
 ```
 
 ---
-
 ### Layer 2 — Data Quality & Cleansing Layer
 
 The second layer performs critical transformations and validation.
