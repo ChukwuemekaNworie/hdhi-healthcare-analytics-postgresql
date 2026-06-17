@@ -1,7 +1,7 @@
--- =============================================================================
+==============================================================================
 -- HEART DISEASE HOSPITALIZATION INFERENCES (HDHI) DATA ENGINE ARCHITECTURE
 -- DATABASE DEVELOPMENT & ADVANCED ANALYTICAL VIEW LAYER PIPELINE
--- =============================================================================
+==============================================================================
 
 ------------------------------------------------------------------------------
 -- STEP 1: TARGET SCHEMA STORAGE INITIALIZATION
@@ -113,7 +113,7 @@ SELECT
 FROM main_clean_data
 WHERE dup_no = 1 
   AND mrd_no IS NOT NULL
-  -- Clinical Guardrails Remediation Layer
+
   AND duration_of_stay >= 0                                    
   AND (d_o_d IS NULL OR d_o_a IS NULL OR d_o_d >= d_o_a);
 
@@ -188,6 +188,7 @@ ORDER BY monthly_volume DESC, admission_period ASC;
     💼 BUSINESS QUESTION 4
     Does a patient's geographic location (Rural vs. Urban) influence ICU stay intensity?
 */
+```
 SELECT 
     CASE 
         WHEN TRIM(rural) = '1' THEN 'Rural'
@@ -203,4 +204,5 @@ GROUP BY
     CASE 
         WHEN TRIM(rural) = '1' THEN 'Rural'
         ELSE 'Urban/Non-Rural'
-    END; -- Fixed grouping and completed cut-off code logic
+    END; 
+```
